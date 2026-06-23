@@ -169,15 +169,16 @@ Usage:
         string srcDir = RequireOption(opts, "source");
         string outDir = RequireOption(opts, "output");
         string? filter = GetOption(opts, "file");
-        bool noChecksum = opts.ContainsKey("no-checksum");
-        _ = noChecksum; // checksum verification not implemented for v1.01 meta block (see gaps)
+        bool noChecksum = opts.ContainsKey("no-checksum"); // --no-checksum disables the skip-when-target-matches check
 
         RtpPatch patch = LoadPatch(file);
 
-        int ok = 0, failed = 0, skipped = 0, missing = 0;
+        int ok = 0, failed = 0, skipped = 0, missing = 0, deleted = 0;
         foreach (RtpRecord r in patch.Records)
         {
-            if (r.Type != RecordType.Modify)
+            // MODIFY carries a delta against the old file; NEW carries the whole new
+            // file; DELETE removes a file. Everything else is not handled here.
+            if (r.Type != RecordType.Modify && r.Type != RecordType.New && r.Type != RecordType.Delete)
                 continue;
             if (filter != null && !r.Path.Contains(filter, StringComparison.OrdinalIgnoreCase))
                 continue;
@@ -186,7 +187,24 @@ Usage:
             string srcPath = Path.Combine(srcDir, rel);
             string dstPath = Path.Combine(outDir, rel);
 
-            if (!File.Exists(srcPath))
+            // DELETE: the file is removed in the new version. Drop it from the output tree
+            // if present (in-place patching); never produce it.
+            if (r.Type == RecordType.Delete)
+            {
+                if (File.Exists(dstPath)) File.Delete(dstPath);
+                Console.WriteLine($"[del]  {r.Path}: removed");
+                deleted++;
+                continue;
+            }
+
+            // A record's delta is applied against whatever is on disk at the target
+            // path: for MODIFY that is the old file (required). A NEW record is the
+            // new-side fileset entry — its payload may be a true create (no source) OR
+            // a delta against the file already present (e.g. a prior patch added it),
+            // so decode against the existing file when present and an empty source
+            // otherwise. This mirrors the official applier's source selection.
+            bool haveSrc = File.Exists(srcPath);
+            if (r.Type == RecordType.Modify && !haveSrc)
             {
                 Console.WriteLine($"[miss] {r.Path}: source not found at {srcPath}");
                 missing++;
@@ -199,18 +217,70 @@ Usage:
                 continue;
             }
 
+            // Skip-when-source-matches-target: expapply.dll computes the on-disk file's
+            // rolling signature and, if it already equals the record's NEW signature,
+            // returns 30 and keeps the file as-is (no decode). A redundant delta encodes
+            // an OLD->NEW transition the on-disk file is no longer the OLD of, so applying
+            // it would corrupt the file; skipping is what keeps a chained rebuild exact.
+            if (haveSrc && r.NewSignature != null && !noChecksum)
+            {
+                byte[] onDisk;
+                using (Stream s = File.OpenRead(srcPath))
+                    onDisk = RtpSignature.Compute(s);
+                if (RtpSignature.Matches(onDisk, r.NewSignature))
+                {
+                    // The file already equals the target. In-place (src==dst): keep it.
+                    // Distinct output tree: copy the current file through unchanged.
+                    if (!PathsEqual(srcPath, dstPath))
+                    {
+                        Directory.CreateDirectory(Path.GetDirectoryName(dstPath)!);
+                        File.Copy(srcPath, dstPath, overwrite: true);
+                    }
+                    Console.WriteLine($"[skip] {r.Path}: already at target (signature match)");
+                    skipped++;
+                    continue;
+                }
+            }
+
+            // Duplicate-content skip: a NEW record whose target file is absent but whose
+            // content already exists elsewhere in the tree (same file name, identical NEW
+            // signature). expapply.dll resolves the record's source from the fileset to that
+            // existing copy, finds it already equals NEW, and skips — so the duplicate
+            // destination is never created (e.g. a patch carries a CREATECHARACTER copy of a
+            // file that already lives under SELECTCHARACTER). Only skip on a real content
+            // match, so distinct same-named files (e.g. CREATE vs SELECT caustic) still build.
+            if (!haveSrc && r.Type == RecordType.New && r.NewSignature != null && !noChecksum)
+            {
+                string? dup = FindDuplicateBySignature(srcDir, Path.GetFileName(rel), srcPath, r.NewSignature);
+                if (dup != null)
+                {
+                    Console.WriteLine($"[skip] {r.Path}: duplicate of {Path.GetRelativePath(srcDir, dup)} (signature match)");
+                    skipped++;
+                    continue;
+                }
+            }
+
             try
             {
-                using var src = File.OpenRead(srcPath);
-                var payload = patch.Raw.AsMemory(r.PayloadOffset, r.PayloadLength);
-                // The decoder self-terminates at the real output size; pass a generous upper
-                // bound (record DstSize is unreliable for >256 MB files). The result is trimmed.
-                long cap = src.Length + (long)r.PayloadLength * 64 + (1 << 24);
-                byte[] result = FixedHuff.DecodeRecord(payload, 0, r.PayloadLength, src, src.Length, cap);
-
+                byte[] result;
+                long srcLen;
+                using (Stream src = haveSrc
+                    ? File.OpenRead(srcPath)
+                    : new MemoryStream(Array.Empty<byte>(), writable: false))
+                {
+                    srcLen = src.Length;
+                    var payload = patch.Raw.AsMemory(r.PayloadOffset, r.PayloadLength);
+                    // The decoder self-terminates at the real output size; pass a generous upper
+                    // bound (record DstSize is unreliable for >256 MB files). The result is trimmed.
+                    long cap = srcLen + (long)r.PayloadLength * 64 + (1 << 24);
+                    result = FixedHuff.DecodeRecord(payload, 0, r.PayloadLength, src, srcLen, cap);
+                }
+                // The source handle is closed above, so overwriting is safe even when the
+                // output path equals the source path (in-place chained patching).
                 Directory.CreateDirectory(Path.GetDirectoryName(dstPath)!);
                 File.WriteAllBytes(dstPath, result);
-                Console.WriteLine($"[ok]   {r.Path}: {src.Length} -> {result.Length} bytes");
+                string kind = r.Type == RecordType.New ? (haveSrc ? "new* " : "new ") : "";
+                Console.WriteLine($"[ok]   {kind}{r.Path}: {srcLen} -> {result.Length} bytes");
                 ok++;
             }
             catch (Exception ex)
@@ -221,7 +291,7 @@ Usage:
         }
 
         Console.WriteLine();
-        Console.WriteLine($"apply: {ok} ok, {failed} failed, {skipped} skipped, {missing} missing source.");
+        Console.WriteLine($"apply: {ok} ok, {deleted} deleted, {failed} failed, {skipped} skipped, {missing} missing source.");
         return failed > 0 ? 3 : 0;
     }
 
@@ -329,6 +399,39 @@ Usage:
 
     private static string? GetOption(Dictionary<string, string> opts, string key)
         => opts.TryGetValue(key, out string? v) && !string.IsNullOrEmpty(v) ? v : null;
+
+    /// <summary>True when two paths resolve to the same file (in-place patching case).</summary>
+    private static bool PathsEqual(string a, string b)
+        => string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Find a file (other than <paramref name="excludePath"/>) under <paramref name="root"/> with the
+    /// given file name whose rolling signature equals <paramref name="sig"/>. Used to detect a NEW
+    /// record that duplicates content already present in the tree, which the official applier skips.
+    /// Returns the matching path, or null if none.
+    /// </summary>
+    private static string? FindDuplicateBySignature(string root, string fileName, string excludePath, byte[] sig)
+    {
+        IEnumerable<string> candidates;
+        try { candidates = Directory.EnumerateFiles(root, fileName, SearchOption.AllDirectories); }
+        catch { return null; }
+
+        foreach (string cand in candidates)
+        {
+            if (PathsEqual(cand, excludePath))
+                continue;
+            try
+            {
+                byte[] candSig;
+                using (Stream s = File.OpenRead(cand))
+                    candSig = RtpSignature.Compute(s);
+                if (RtpSignature.Matches(candSig, sig))
+                    return cand;
+            }
+            catch { /* unreadable candidate — ignore */ }
+        }
+        return null;
+    }
 
     /// <summary>Flatten a relative path into a single safe file name for the .opcodes dump.</summary>
     private static string SafeFileName(string path)

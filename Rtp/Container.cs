@@ -78,6 +78,13 @@ public enum RecordType
     New = 3,
     Modify = 4,
     Mkdir = 5,
+
+    /// <summary>
+    /// Delete entry: the file is removed in the new fileset (marker 0x01, one entry,
+    /// no trailer and no payload). The applier deletes the existing file. Confirmed
+    /// from the v303 mirror: e.g. CURSOR\twinkle.ani is created then deleted and stays
+    /// absent — a carry-forward would leave it present.
+    /// </summary>
     Delete = 6,
 }
 
@@ -135,6 +142,14 @@ public sealed class RtpRecord
 
     /// <summary>Payload length in bytes (compressed diff for MODIFY, raw image for NEW; may be 0).</summary>
     public int PayloadLength;
+
+    /// <summary>
+    /// The NEW (target) entry's 10-byte rolling signature (<see cref="RtpSignature"/>),
+    /// stored immediately before the 9-byte payload trailer. Used by the applier to skip
+    /// a record whose target file is already present on disk (source already equals NEW).
+    /// Null for DELETE records or when it cannot be located.
+    /// </summary>
+    public byte[]? NewSignature;
 
     public List<RtpEntry> Src = new();
     public List<RtpEntry> Dst = new();
@@ -251,10 +266,12 @@ public static class RtpContainer
             int dirIndex = data[p];
             p += 1;
 
-            // Marker ends in 0x01 immediately before the first entry descriptor.
-            // A leading 0x09 byte signals a MODIFY (delta) record (OLD + NEW entries);
-            // otherwise it is a whole-file NEW record (NEW entry only).
+            // The marker byte right after dirIndex selects the record kind:
+            //   0x09  MODIFY (delta) : OLD entry + NEW entry + trailer + payload  (09 00 01)
+            //   0x01  DELETE         : one entry, NO trailer/payload (file removed) (01)
+            //   else  NEW (create)   : NEW entry + trailer + payload  (00 01)
             bool isDelta = data[p] == 0x09;
+            bool isDelete = data[p] == 0x01;
 
             // Skip marker bytes up to the first valid entry descriptor.
             int markerLimit = Math.Min(n, p + 8);
@@ -266,7 +283,7 @@ public static class RtpContainer
 
             var record = new RtpRecord
             {
-                Type = isDelta ? RecordType.Modify : RecordType.New,
+                Type = isDelta ? RecordType.Modify : (isDelete ? RecordType.Delete : RecordType.New),
                 Path = path,
                 DirIndex = dirIndex,
             };
@@ -274,6 +291,23 @@ public static class RtpContainer
             // First entry.
             RtpEntry first = ReadEntry(data, entryPos, out int afterFirst);
             int afterEntries;
+
+            if (isDelete)
+            {
+                // Delete: names the removed (old) file, one entry, no trailer/payload. The
+                // variable-length meta block runs up to the next record boundary (separator
+                // or EOF terminator).
+                record.Src.Add(first);
+                record.SrcSize = first.Size;
+                int q = afterFirst;
+                while (q < n - 1 && !IsRecordBoundary(data, q))
+                    q++;
+                record.PayloadOffset = q;
+                record.PayloadLength = 0;
+                patch.Records.Add(record);
+                p = q;
+                continue;
+            }
 
             if (isDelta)
             {
@@ -310,6 +344,13 @@ public static class RtpContainer
 
             record.PayloadOffset = payloadOffset;
             record.PayloadLength = payloadLength;
+
+            // The NEW entry's 10-byte signature sits directly before the 9-byte trailer
+            // (trailer starts at payloadOffset - 9; the signature is the 10 bytes before it).
+            int sigOff = payloadOffset - 9 - RtpSignature.Length;
+            if (sigOff >= 0)
+                record.NewSignature = data.AsSpan(sigOff, RtpSignature.Length).ToArray();
+
             patch.Records.Add(record);
 
             p = payloadOffset + payloadLength;
