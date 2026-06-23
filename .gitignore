@@ -1,0 +1,13 @@
+# Build output
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# Reverse-engineering working artifacts (kept local only):
+#  - _debug/ holds the proprietary expapply.dll, its Hex-Rays decompiles, the
+#    x86 harness and the IDA database; none of that is redistributable.
+#  - _*.py are throwaway binary-analysis scratch scripts.
+_debug/
+_*.py
