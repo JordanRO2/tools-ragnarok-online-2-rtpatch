@@ -34,6 +34,7 @@ internal static class Program
                 "list"    => CmdList(rest),
                 "extract" => CmdExtract(rest),
                 "apply"   => CmdApply(rest),
+                "build"   => CmdBuild(rest),
                 "decode-test" => CmdDecodeTest(rest),
                 "-h" or "--help" or "help" => Usage(),
                 _ => UnknownCommand(cmd),
@@ -62,7 +63,38 @@ Usage:
   rtpatch inspect <file.rtp>
   rtpatch list    <file.rtp>
   rtpatch extract <file.rtp> --out <dir> [--file <substr>]
-  rtpatch apply   <file.rtp> --source <dir> --output <dir> [--file <substr>] [--no-checksum]");
+  rtpatch apply   <file.rtp> --source <dir> --output <dir> [--file <substr>] [--no-checksum]
+  rtpatch build   <out.rtp> --add <relpath>=<contentfile> [--add ...]   (create whole-file patches)");
+        return 0;
+    }
+
+    // ── build (create a .RTP that adds whole files, store-mode payloads) ───────
+    private static int CmdBuild(string[] args)
+    {
+        string outFile = RequirePositional(args, "output.rtp");
+        var builder = new RtpBuilder();
+        int added = 0;
+        for (int i = 0; i < args.Length; i++)
+        {
+            if (args[i] != "--add" || i + 1 >= args.Length) continue;
+            string spec = args[++i];
+            int eq = spec.IndexOf('=');
+            if (eq < 0) throw new ArgumentException($"--add expects <relpath>=<contentfile>, got '{spec}'");
+            string rel = spec[..eq].Replace('/', '\\').Trim('\\');
+            byte[] content = File.ReadAllBytes(spec[(eq + 1)..]);
+            int slash = rel.LastIndexOf('\\');
+            string dir = slash >= 0 ? rel[..slash] : string.Empty;
+            string name = slash >= 0 ? rel[(slash + 1)..] : rel;
+            builder.AddFile(dir, name, content);
+            Console.WriteLine($"  + {rel}  ({content.Length} bytes)");
+            added++;
+        }
+        if (added == 0)
+            throw new ArgumentException("nothing to build: pass --add <relpath>=<contentfile> (repeatable)");
+
+        byte[] rtp = builder.Build();
+        File.WriteAllBytes(outFile, rtp);
+        Console.WriteLine($"[built] {outFile}: {rtp.Length} bytes, {added} file(s)");
         return 0;
     }
 
