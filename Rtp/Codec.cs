@@ -732,7 +732,10 @@ internal static class FixedHuff
         if (clcMax == 0) throw new RtpCodecException("adaptive: empty code-length code");
 
         var clcExtra = new byte[26];
-        clcExtra[25] = 4;   // symbol 25 (repeat-prev) carries a 4-bit count
+        // Extra table a3[11] = v128 (memset 0) followed by v129 = 0x0400; as a byte array that
+        // places byte[24]=0, byte[25]=4. So symbol 25 (repeat-prev) reads a 4-bit count; all
+        // other CLC symbols read 0 extra bits.
+        clcExtra[25] = 4;
         var clcTree = BuildFromLengths(clcLen, 26, clcMin, clcMax, 26, 0, clcExtra);
         if (dbg)
         {
@@ -741,6 +744,10 @@ internal static class FixedHuff
             Console.Error.WriteLine($"   [CLC sel={sel}] min={min} clcMin={clcMin} clcMax={clcMax} mainMax={mainMax} kraft={ck:F4} clc={cl}");
         }
 
+        // Faithful port of sub_10003F20 main loop (lines 551-623). v51=idx, v52=prev,
+        // v88=cont, v53=alphabet. Only symbol 25 carries extra (clcExtra[25]=4); symbol 25
+        // with ex/cont writes prev ex+1 times (LABEL_110), with ex==0 && !cont fills prev to
+        // the end and terminates; symbol 24 marks "length 0 here"; a literal writes its length.
         var mainLen = new byte[alphabet];
         int idx = 0, prev = 24;
         bool cont = false;
@@ -749,17 +756,26 @@ internal static class FixedHuff
             (int s, uint ex) = DecodeT(br, clcTree);
             if (s == 25)
             {
-                if (ex != 0)
+                if (ex != 0 || cont)
                 {
+                    // LABEL_110: v57 = ex+1; write prev (if !=24) ex+1 times; then idx net += ex+1.
                     if (ex == 15) cont = true;
                     int rep = (int)ex + 1;
-                    for (int r = 0; r < rep && idx < alphabet; r++) { if (prev != 24) mainLen[idx] = (byte)prev; idx++; }
+                    for (int r = 0; r < rep; r++)
+                    {
+                        if (prev != 24 && idx < alphabet) mainLen[idx] = (byte)prev;
+                        idx++;
+                    }
                 }
-                else if (cont) { if (prev != 24 && idx < alphabet) mainLen[idx] = (byte)prev; idx++; }
-                else { if (prev != 24) for (int j = idx; j < alphabet; j++) mainLen[j] = (byte)prev; break; }
+                else
+                {
+                    // v88==0, v95==0: fill prev to the end, then v51=v53 (terminate).
+                    if (prev != 24) for (int j = idx; j < alphabet; j++) mainLen[j] = (byte)prev;
+                    idx = alphabet;
+                }
             }
-            else if (s == 24) { prev = 24; idx++; cont = false; }
-            else { mainLen[idx] = (byte)s; prev = s; idx++; cont = false; }
+            else if (s == 24) { cont = false; prev = 24; idx++; }
+            else { cont = false; mainLen[idx] = (byte)s; prev = s; idx++; }
         }
         return FinishMain(mainLen, alphabet, escSym, escBits, extra, dbg, $"clc sel={sel}");
     }
