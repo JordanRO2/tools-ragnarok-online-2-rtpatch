@@ -14,3 +14,6 @@ _*.py
 
 # private-server runtime log
 private-server/patchsrv.log
+
+# original Aeria/WarpPortal notice pages kept as local reference only
+private-server/news/reference/
