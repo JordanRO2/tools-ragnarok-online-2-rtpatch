@@ -65,5 +65,13 @@ if ($RtpPath) {
   Write-Warning "no -RtpPath: ServerVersion.ini advertises $PatchVersion but no 00000$($RtpVersion).RTP is published; the launcher will 404 the download."
 }
 
+# launcher news web views: big news at "/" (407x274) + top banner at /notice/indexad.html (407x95)
+$notice  = Join-Path $WwwRoot 'notice'
+$null    = New-Item -ItemType Directory -Force $notice
+$newsDir = Join-Path $PSScriptRoot 'news'
+if (Test-Path (Join-Path $newsDir 'index.html'))   { Copy-Item (Join-Path $newsDir 'index.html')   (Join-Path $WwwRoot 'index.html')  -Force }
+if (Test-Path (Join-Path $newsDir 'indexad.html')) { Copy-Item (Join-Path $newsDir 'indexad.html') (Join-Path $notice  'indexad.html') -Force }
+Write-Host "  news: / (407x274) + /notice/indexad.html (407x95)"
+
 Write-Host "www ready: $WwwRoot   (server game/patch = $GameVersion/$PatchVersion, lang = $Lang)"
 Write-Host "start it:  python `"$PSScriptRoot\patchsrv.py`" `"$WwwRoot`" 8080"

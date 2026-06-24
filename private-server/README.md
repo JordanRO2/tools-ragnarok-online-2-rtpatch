@@ -28,9 +28,23 @@ RO2Updater.exe ──4× GET /Patch/Global/Launcher/MD5/...──► (self-check
 
 | File | What it does |
 |---|---|
-| `apply-client-mods.ps1` | renames the two exes, byte-patches the updater's spawn target + self-refs, repoints `String.tbl` line 27, writes `RO2_option.ini`. `-NoUac` flips the updater manifest to `asInvoker`. |
-| `make-www.ps1` | builds the server document root: the four empty stage-1 `MD5` manifests + `ServerVersion.ini` + your `.RTP`. |
+| `apply-client-mods.ps1` | renames the two exes, byte-patches the updater's spawn target + self-refs, repoints `String.tbl` line 27 (patch host) and lines 30 + 50 (notice/news URLs), writes `RO2_option.ini`. `-NoUac` flips the updater manifest to `asInvoker`. |
+| `make-www.ps1` | builds the server document root: the four empty stage-1 `MD5` manifests + `ServerVersion.ini` + your `.RTP` + the launcher news pages. |
 | `patchsrv.py` | minimal **HTTP/1.1** static server (HTTP/1.1 is required, see below). |
+| `news/` | the launcher's two web-view pages: `index.html` (big news, **407×274**, served at `/`) + `indexad.html` (top banner, **407×95**, served at `/notice/indexad.html`). Edit for your own news. |
+
+### Launcher news page
+
+The launcher shows two embedded IE web views, both repointed by `apply-client-mods.ps1`
+(`String.tbl` lines 30 + 50) and served by `make-www.ps1`:
+- **`/`** — the big news panel, viewport **407 × 274** (`Internet Explorer_Server`).
+- **`/notice/indexad.html`** — the top banner, viewport **407 × 95**.
+
+Sizes were measured from the live web-view windows; the `news/` templates use `overflow:hidden`
+sized to those exact viewports so there's no scrollbar. Replace `news/*.html` with your own
+content (keep it inside the viewport). Old embedded IE renders ~IE7-mode by default, so the
+templates avoid gradients/rounded corners; for modern CSS, set a `FEATURE_BROWSER_EMULATION`
+value for `RO2Updater.exe`/`RO2Launcher.exe`.
 
 ## Reproduce from a fresh client
 

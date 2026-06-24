@@ -37,14 +37,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         print(line, flush=True)
         open(LOG, "a").write(line + "\n")
 
+    def _status(self):
+        p = self.translate_path(self.path)
+        if os.path.isdir(p):  # a directory serves its index.html (e.g. "/" = the big-news page)
+            return 200 if any(os.path.isfile(os.path.join(p, i)) for i in ("index.html", "index.htm")) else 404
+        return 200 if os.path.isfile(p) else 404
+
     def do_GET(self):
         self._norm()
-        self._log(200 if os.path.isfile(self.translate_path(self.path)) else 404)
+        self._log(self._status())
         super().do_GET()
 
     def do_HEAD(self):
         self._norm()
-        self._log(200 if os.path.isfile(self.translate_path(self.path)) else 404)
+        self._log(self._status())
         super().do_HEAD()
 
     def log_message(self, *a):

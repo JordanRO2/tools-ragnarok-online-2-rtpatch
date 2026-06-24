@@ -13,7 +13,7 @@
          0x1274F0  "RO2Client.exe" -> "RO2Updater.exe"   (self-update .exe name)
          0x1276F7  "RO2Client.exe" -> "RO2Updater.exe"   (registry self-path)
          0x14EEBE  "RO2Client.pdb" -> "RO2Updater.pdb"   (debug pdb; cosmetic)
-    4. Launcher\String.tbl line 27 (field 26) -> the patch host
+    4. Launcher\String.tbl: line 27 -> patch host; lines 30 + 50 -> notice/news URLs (launcher web views)
     5. RO2_option.ini  [NATION_CODE] LANGUAGE=1   (else the updater aborts "Need Language Pack")
     6. (-NoUac) flip the updater's manifest requireAdministrator -> asInvoker (runs without UAC)
 
@@ -86,22 +86,25 @@ Patch-Bytes $upd 0x1276F7 ((AB 'RO2Client.exe') + [byte[]]@(0)) (AB 'RO2Updater.
 # 0x14EEBE: "RO2Client.pdb"(13) + 1 NUL -> "RO2Updater.pdb"(14)   [cosmetic]
 Patch-Bytes $upd 0x14EEBE ((AB 'RO2Client.pdb') + [byte[]]@(0)) (AB 'RO2Updater.pdb') 'pdb-name'
 
-Write-Host "== String.tbl host repoint (line 27 / field 26) =="
+Write-Host "== String.tbl repoints (patch host + launcher notice/news URLs) =="
 $tbl = Join-Path $ClientRoot 'Launcher\String.tbl'
 if (Test-Path $tbl) {
-  $text = [System.IO.File]::ReadAllText($tbl,$iso)
-  $parts = $text -split "`n"
-  if ($parts.Count -le 26) { Write-Warning "String.tbl has < 27 lines; not repointed" }
-  else {
-    $cur = $parts[26]; $cr = if ($cur.EndsWith("`r")) {"`r"} else {""}
-    $oldHost = $cur.TrimEnd("`r")
-    if ($oldHost -eq $PatchHost) { Write-Host "  [skip] line 27 already '$PatchHost'" }
-    else {
-      $parts[26] = $PatchHost + $cr
-      [System.IO.File]::WriteAllText($tbl, ($parts -join "`n"), $iso)   # byte-precise: only line 27 changes
-      Write-Host "  [ok]   line 27 host: '$oldHost' -> '$PatchHost'"
-    }
+  $parts = ([System.IO.File]::ReadAllText($tbl,$iso)) -split "`n"
+  # 0-based line index -> value. 26 = patch host (line 27); 29 = notice base (line 30, the big news web view "/");
+  # 49 = news banner page (line 50, the top web view "/notice/indexad.html"). News served by make-www.ps1.
+  $repoints = [ordered]@{
+    26 = $PatchHost
+    29 = "http://$PatchHost"
+    49 = "http://$PatchHost/notice/indexad.html"
   }
+  foreach ($idx in @($repoints.Keys)) {
+    if ($parts.Count -le $idx) { Write-Warning "String.tbl has <= $idx lines; skipping line $($idx+1)"; continue }
+    $cr  = if ($parts[$idx].EndsWith("`r")) {"`r"} else {""}
+    $old = $parts[$idx].TrimEnd("`r"); $val = [string]$repoints[$idx]
+    if ($old -eq $val) { Write-Host "  [skip] line $($idx+1) already '$val'" }
+    else { $parts[$idx] = $val + $cr; Write-Host "  [ok]   line $($idx+1): '$old' -> '$val'" }
+  }
+  [System.IO.File]::WriteAllText($tbl, ($parts -join "`n"), $iso)   # byte-precise: only the named lines change
 } else { Write-Warning "String.tbl not found at $tbl" }
 
 Write-Host "== RO2_option.ini (LANGUAGE gate) =="
