@@ -11,3 +11,6 @@ obj/
 #  - _*.py are throwaway binary-analysis scratch scripts.
 _debug/
 _*.py
+
+# private-server runtime log
+private-server/patchsrv.log
